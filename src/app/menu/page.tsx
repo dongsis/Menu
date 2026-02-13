@@ -48,7 +48,7 @@ type CartItem = {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-const SESSION_ID = "34325d98-f10d-49c9-b30f-2a5e05217e28";
+const SESSION_ID = "1766ff75-c964-43a6-a11a-232080e0eb29";
 
 function cents(n: number) {
   return (n / 100).toFixed(2);
