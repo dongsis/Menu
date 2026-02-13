@@ -1,15 +1,13 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
-type MenuSection = {
-  id: string;
-  sort: number;
-  name_en: string;
-  name_zh: string;
-};
+/* ------------------------------------------------------------------ */
+/*  Types                                                              */
+/* ------------------------------------------------------------------ */
 
+type MenuSection = { id: string; sort: number; name_en: string; name_zh: string };
 type MenuItem = {
   id: string;
   section_id: string;
@@ -18,156 +16,274 @@ type MenuItem = {
   title_zh: string;
   base_price_cents: number;
 };
+type OptionGroup = {
+  id: string;
+  name_en: string;
+  name_zh: string;
+  selection_type?: string; // 'single' | 'multi'
+  sort: number;
+};
+type MenuOption = {
+  id: string;
+  group_id: string;
+  label_en: string;
+  label_zh: string;
+  price_delta_cents: number;
+  sort: number;
+};
+type CartItem = {
+  id: string;
+  menuItemId: string;
+  titleEn: string;
+  titleZh: string;
+  basePriceCents: number;
+  totalPriceCents: number;
+  qty: number;
+  optionIds: string[];
+  optionLabels: string[];
+  note: string;
+};
+
+/* ------------------------------------------------------------------ */
+/*  Constants                                                          */
+/* ------------------------------------------------------------------ */
+
+const SESSION_ID = "34325d98-f10d-49c9-b30f-2a5e05217e28";
 
 function cents(n: number) {
   return (n / 100).toFixed(2);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Page                                                               */
+/* ------------------------------------------------------------------ */
+
 export default function MenuPage() {
+  /* ---- menu data ---- */
   const [sections, setSections] = useState<MenuSection[]>([]);
   const [items, setItems] = useState<MenuItem[]>([]);
-  const [cart, setCart] = useState<any[]>([]);
+  const [optionGroups, setOptionGroups] = useState<OptionGroup[]>([]);
+  const [allOptions, setAllOptions] = useState<MenuOption[]>([]);
+  const [itemGroupLinks, setItemGroupLinks] = useState<{ menu_item_id: string; group_id: string }[]>([]);
 
-  // ✅ 姓名控制
+  /* ---- cart ---- */
+  const [cart, setCart] = useState<CartItem[]>([]);
   const [customerName, setCustomerName] = useState("");
+
+  /* ---- per-item option selections (optionId set keyed by menuItemId) ---- */
+  const [selectedOpts, setSelectedOpts] = useState<Record<string, Set<string>>>({});
+
+  /* ---- submit ---- */
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+
   const canOrder = customerName.trim().length > 0;
 
-  // ===== Salads Add-ons =====
-  const SALAD_ADDONS = useMemo(
-    () => [
-      { name: "Chicken", price: 6 },
-      { name: "Steak", price: 12 },
-      { name: "Salmon", price: 10 },
-      { name: "Shrimp", price: 9 },
-      { name: "Tofu", price: 4 },
-    ],
-    []
-  );
-  const [saladAddons, setSaladAddons] = useState<{ name: string; price: number }[]>([]);
+  /* ================================================================ */
+  /*  Load all data                                                    */
+  /* ================================================================ */
 
-  // ===== Sandwich Side Dishes (+1 / +2) =====
-  const SIDE_DISHES = useMemo(
-    () => [
-      { name: "Mixed Green Salad", price: 1 },
-      { name: "Caesar Salad", price: 1 },
-      { name: "French Fries", price: 1 },
-      { name: "Sweet Potato Fries", price: 1 },
-      { name: "Onion Rings", price: 1 },
-      { name: "Daily Soup", price: 2 },
-    ],
-    []
-  );
-  const [sandwichSide, setSandwichSide] = useState<{ name: string; price: number } | null>(null);
-  const [glutenFreeBun, setGlutenFreeBun] = useState(false); // +$2
-
-  // ===== Pizza options =====
-  const [glutenFreeCrust, setGlutenFreeCrust] = useState(false); // +$3
-
-  // ---- Load menu ----
   useEffect(() => {
-    async function load() {
-      const s = await supabase.from("menu_sections").select("*").order("sort");
-      const i = await supabase.from("menu_items").select("*").order("sort");
-      if (s.data) setSections(s.data as any);
-      if (i.data) setItems(i.data as any);
-    }
-    load();
+    (async () => {
+      const [s, i, og, o, iog] = await Promise.all([
+        supabase.from("menu_sections").select("*").order("sort"),
+        supabase.from("menu_items").select("*").order("sort"),
+        supabase.from("menu_option_groups").select("*"),
+        supabase.from("menu_options").select("*"),
+        supabase.from("menu_item_option_groups").select("*"),
+      ]);
+      console.log("[DEBUG] option_groups[0]:", og.data?.[0]);
+      console.log("[DEBUG] options[0]:", o.data?.[0]);
+      console.log("[DEBUG] item_option_groups[0]:", iog.data?.[0]);
+      if (s.data) setSections(s.data);
+      if (i.data) setItems(i.data);
+      if (og.data) setOptionGroups(og.data);
+      if (o.data) setAllOptions(o.data);
+      if (iog.data) setItemGroupLinks(iog.data);
+    })();
   }, []);
 
-  // ---- Helpers: classify section ----
-  function isSalads(sec: MenuSection) {
-    return sec.name_en.trim().toLowerCase() === "salads";
+  /* ================================================================ */
+  /*  Build lookup: menuItemId → [{ group, options[] }]                */
+  /* ================================================================ */
+
+  const itemOptionsMap = useMemo(() => {
+    const map = new Map<string, { group: OptionGroup; options: MenuOption[] }[]>();
+    for (const link of itemGroupLinks) {
+      const group = optionGroups.find((g) => g.id === link.group_id);
+      if (!group) continue;
+      const opts = allOptions
+        .filter((o) => o.group_id === group.id)
+        .sort((a, b) => (a.sort ?? 0) - (b.sort ?? 0));
+      if (!map.has(link.menu_item_id)) map.set(link.menu_item_id, []);
+      map.get(link.menu_item_id)!.push({ group, options: opts });
+    }
+    for (const groups of map.values()) {
+      groups.sort((a, b) => (a.group.sort ?? 0) - (b.group.sort ?? 0));
+    }
+    return map;
+  }, [itemGroupLinks, optionGroups, allOptions]);
+
+  /* ================================================================ */
+  /*  Option selection                                                 */
+  /* ================================================================ */
+
+  function toggleOption(itemId: string, optId: string, groupId: string, isMulti: boolean) {
+    setSelectedOpts((prev) => {
+      const s = new Set(prev[itemId] || []);
+      if (isMulti) {
+        if (s.has(optId)) s.delete(optId);
+        else s.add(optId);
+      } else {
+        // single-select: clear others in this group, then set
+        const groupOptIds = allOptions.filter((o) => o.group_id === groupId).map((o) => o.id);
+        for (const id of groupOptIds) s.delete(id);
+        s.add(optId);
+      }
+      return { ...prev, [itemId]: s };
+    });
   }
 
-  function isSandwiches(sec: MenuSection) {
-    const n = sec.name_en.trim().toLowerCase();
-    return n.includes("sandwich");
-  }
+  /* ================================================================ */
+  /*  Cart helpers                                                     */
+  /* ================================================================ */
 
-  function isPizza(sec: MenuSection) {
-    const n = sec.name_en.trim().toLowerCase();
-    return n.includes("pizza");
-  }
-
-  function isSideDishesSection(sec: MenuSection) {
-    const n = sec.name_en.trim().toLowerCase();
-    return n === "side dishes" || n === "sides" || n.includes("side dishes");
-  }
-
-  // ---- Cart pricing ----
-  function lineTotalCents(line: any) {
-    return line.customPrice ? line.customPrice * line.qty : line.base_price_cents * line.qty;
-  }
-
-  // ---- Core: add to cart with section-specific extras ----
-  function addToCart(item: MenuItem, sec: MenuSection) {
+  function addToCart(item: MenuItem) {
     if (!canOrder) return;
 
-    let finalPrice = item.base_price_cents;
-    const meta: any = {};
-
-    // Salads: add-ons
-    if (isSalads(sec)) {
-      const addonsTotal = saladAddons.reduce((sum, a) => sum + a.price * 100, 0);
-      finalPrice += addonsTotal;
-      if (saladAddons.length) meta.saladAddons = saladAddons.map((a) => a.name);
-      setSaladAddons([]);
-    }
-
-    // Sandwiches: side dish + GF bun
-    if (isSandwiches(sec)) {
-      if (sandwichSide) {
-        finalPrice += sandwichSide.price * 100;
-        meta.sideDish = sandwichSide.name;
-        meta.sideDishPrice = sandwichSide.price;
-      }
-      if (glutenFreeBun) {
-        finalPrice += 200;
-        meta.glutenFreeBun = true;
-      }
-      setSandwichSide(null);
-      setGlutenFreeBun(false);
-    }
-
-    // Pizza: GF crust
-    if (isPizza(sec)) {
-      if (glutenFreeCrust) {
-        finalPrice += 300;
-        meta.glutenFreeCrust = true;
-      }
-      setGlutenFreeCrust(false);
-    }
+    const sel = selectedOpts[item.id] || new Set<string>();
+    const selOpts = allOptions.filter((o) => sel.has(o.id));
+    const delta = selOpts.reduce((sum, o) => sum + o.price_delta_cents, 0);
 
     setCart((prev) => [
       ...prev,
       {
         id: crypto.randomUUID(),
         menuItemId: item.id,
-        title: `${item.title_en} / ${item.title_zh}`,
-        base_price_cents: item.base_price_cents,
-        customPrice: finalPrice,
+        titleEn: item.title_en,
+        titleZh: item.title_zh,
+        basePriceCents: item.base_price_cents,
+        totalPriceCents: item.base_price_cents + delta,
         qty: 1,
-        meta,
+        optionIds: selOpts.map((o) => o.id),
+        optionLabels: selOpts.map(
+          (o) =>
+            `${o.label_en}/${o.label_zh}${o.price_delta_cents ? ` (+$${cents(o.price_delta_cents)})` : ""}`
+        ),
+        note: "",
       },
     ]);
+
+    // reset selections for this item
+    setSelectedOpts((prev) => ({ ...prev, [item.id]: new Set() }));
   }
 
   function removeLine(id: string) {
-    setCart((prev) => prev.filter((x: any) => x.id !== id));
+    setCart((prev) => prev.filter((x) => x.id !== id));
   }
+
+  const cartTotal = useMemo(
+    () => cart.reduce((sum, it) => sum + it.totalPriceCents * it.qty, 0),
+    [cart]
+  );
+
+  /* ================================================================ */
+  /*  Submit order                                                     */
+  /* ================================================================ */
+
+  const submitOrder = useCallback(async () => {
+    if (!cart.length || !customerName.trim()) return;
+
+    setSubmitting(true);
+    setSubmitError("");
+
+    try {
+      // 1. create / get draft order
+      const { data: orderData, error: orderError } = await supabase.rpc(
+        "rpc_get_or_create_draft_order",
+        {
+          p_session_id: SESSION_ID,
+          p_display_name: customerName.trim(),
+        }
+      );
+      if (orderError) throw new Error(orderError.message);
+
+      const { order_id, edit_token } = orderData;
+
+      // 2. upsert each cart item
+      for (const item of cart) {
+        const { error } = await supabase.rpc("rpc_upsert_order_item", {
+          p_order_id: order_id,
+          p_edit_token: edit_token,
+          p_order_item_id: null,
+          p_menu_item_id: item.menuItemId,
+          p_qty: item.qty,
+          p_note: item.note,
+          p_option_ids: item.optionIds,
+        });
+        if (error) throw new Error(error.message);
+      }
+
+      // success
+      setSubmitted(true);
+      setCart([]);
+    } catch (err: any) {
+      setSubmitError(err.message || "Failed to submit order");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [cart, customerName]);
+
+  /* ================================================================ */
+  /*  Helpers                                                          */
+  /* ================================================================ */
+
+  function isSideDishesSection(sec: MenuSection) {
+    const n = sec.name_en.trim().toLowerCase();
+    return n === "side dishes" || n === "sides" || n.includes("side dishes");
+  }
+
+  /* ================================================================ */
+  /*  Render: submitted success                                        */
+  /* ================================================================ */
+
+  if (submitted) {
+    return (
+      <div className="cny-card" style={{ maxWidth: 980, margin: "40px auto", padding: 24, textAlign: "center" }}>
+        <h1 style={{ color: "#b22222" }}>2026 ORC 新春联谊午餐</h1>
+        <div style={{ fontSize: 24, fontWeight: 800, marginTop: 40, color: "#228B22" }}>
+          Order submitted! / 订单已提交！
+        </div>
+        <div style={{ marginTop: 16, opacity: 0.75 }}>
+          {customerName.trim()}, your order has been received.
+        </div>
+        <button
+          style={{ marginTop: 24, padding: "10px 24px", fontSize: 16, cursor: "pointer" }}
+          onClick={() => setSubmitted(false)}
+        >
+          Order more / 继续点餐
+        </button>
+      </div>
+    );
+  }
+
+  /* ================================================================ */
+  /*  Render: main page                                                */
+  /* ================================================================ */
 
   return (
     <div className="cny-card" style={{ maxWidth: 980, margin: "40px auto", padding: 24 }}>
       <h1 style={{ textAlign: "center", color: "#b22222" }}>2026 ORC 新春联谊午餐</h1>
 
-      {/* ✅ 姓名输入（无提示文案） */}
+      {/* ---- Name input ---- */}
       <div style={{ marginTop: 18, marginBottom: 18, display: "flex", justifyContent: "center" }}>
         <div style={{ width: "min(720px, 100%)", display: "flex", gap: 10, alignItems: "center" }}>
           <div style={{ fontWeight: 600, whiteSpace: "nowrap" }}>Name / 姓名</div>
           <input
             value={customerName}
             onChange={(e) => setCustomerName(e.target.value)}
-              style={{
+            style={{
               flex: 1,
               padding: "10px 12px",
               borderRadius: 10,
@@ -178,13 +294,11 @@ export default function MenuPage() {
         </div>
       </div>
 
-      {/* ✅ 主菜单：隐藏独立 Side Dishes section */}
+      {/* ---- Menu sections ---- */}
       {sections
         .filter((sec) => !isSideDishesSection(sec))
         .map((sec) => {
-          const secItems = items
-            .filter((it) => it.section_id === sec.id)
-            .sort((a, b) => a.sort - b.sort);
+          const secItems = items.filter((it) => it.section_id === sec.id).sort((a, b) => a.sort - b.sort);
 
           return (
             <div key={sec.id} style={{ marginBottom: 24 }}>
@@ -192,171 +306,95 @@ export default function MenuPage() {
                 {sec.name_en} / {sec.name_zh}
               </h2>
 
-              {/* ✅ 先展示该大类的附加选项：放在标题下面 */}
-              {isSalads(sec) && (
-                <div
-                  style={{
-                    marginTop: 10,
-                    marginBottom: 14,
-                    padding: 12,
-                    border: "1px solid #ddd",
-                    borderRadius: 8,
-                    background: "#fafafa",
-                    opacity: canOrder ? 1 : 0.7,
-                  }}
-                >
-                  <div style={{ fontWeight: 700, marginBottom: 6 }}>Add-ons (Optional) / 加料（可选）</div>
+              {secItems.map((it) => {
+                const groups = itemOptionsMap.get(it.id) || [];
+                const sel = selectedOpts[it.id] || new Set<string>();
 
-                  {SALAD_ADDONS.map((addon) => (
-                    <label key={addon.name} style={{ display: "block", fontSize: 14 }}>
-                      <input
-                        type="checkbox"
-                        checked={saladAddons.some((a) => a.name === addon.name)}
-                        onChange={() => {
-                          setSaladAddons((prev) => {
-                            const exists = prev.find((a) => a.name === addon.name);
-                            if (exists) return prev.filter((a) => a.name !== addon.name);
-                            return [...prev, addon];
-                          });
+                return (
+                  <div
+                    key={it.id}
+                    style={{
+                      border: "1px solid #eee",
+                      padding: 12,
+                      borderRadius: 8,
+                      marginBottom: 10,
+                    }}
+                  >
+                    {/* item header: title + price */}
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                      <div style={{ fontWeight: 600 }}>
+                        {it.title_en} / {it.title_zh}
+                      </div>
+                      <div style={{ whiteSpace: "nowrap", fontWeight: 600 }}>${cents(it.base_price_cents)}</div>
+                    </div>
+
+                    {/* option groups for this item */}
+                    {groups.length > 0 && (
+                      <div
+                        style={{
+                          marginTop: 8,
+                          padding: 8,
+                          background: "#fafafa",
+                          borderRadius: 6,
+                          opacity: canOrder ? 1 : 0.7,
                         }}
-                      />{" "}
-                      {addon.name} (+${addon.price})
-                    </label>
-                  ))}
+                      >
+                        {groups.map(({ group, options: opts }) => {
+                          const isMulti = group.selection_type !== "single";
+                          return (
+                            <div key={group.id} style={{ marginBottom: 6 }}>
+                              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>
+                                {group.name_en} / {group.name_zh}
+                              </div>
+                              {opts.map((opt) => (
+                                <label key={opt.id} style={{ display: "block", fontSize: 13, cursor: "pointer" }}>
+                                  <input
+                                    type={isMulti ? "checkbox" : "radio"}
+                                    name={isMulti ? undefined : `${it.id}-${group.id}`}
+                                    checked={sel.has(opt.id)}
+                                    onChange={() => toggleOption(it.id, opt.id, group.id, isMulti)}
+                                    disabled={!canOrder}
+                                  />{" "}
+                                  {opt.label_en} / {opt.label_zh}
+                                  {opt.price_delta_cents > 0 && ` (+$${cents(opt.price_delta_cents)})`}
+                                </label>
+                              ))}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
 
-                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-                    Tip: Select add-ons first, then click “Add” on your salad.
-                    <br />
-                    提示：请先选择加料，然后点击对应沙拉的 “Add” 按钮。
+                    {/* Add button */}
+                    <div style={{ marginTop: 8, textAlign: "right" }}>
+                      <button
+                        disabled={!canOrder}
+                        onClick={() => addToCart(it)}
+                        style={{
+                          opacity: canOrder ? 1 : 0.4,
+                          cursor: canOrder ? "pointer" : "not-allowed",
+                        }}
+                      >
+                        Add
+                      </button>
+                    </div>
                   </div>
-                </div>
-              )}
-
-              {isSandwiches(sec) && (
-                <div
-                  style={{
-                    marginTop: 10,
-                    marginBottom: 14,
-                    padding: 12,
-                    border: "1px solid #ddd",
-                    borderRadius: 8,
-                    background: "#fafafa",
-                    opacity: canOrder ? 1 : 0.7,
-                  }}
-                >
-                  <div style={{ fontWeight: 700, marginBottom: 6 }}>Side Dishes / 配菜</div>
-
-                  {SIDE_DISHES.map((sd) => (
-                    <label key={sd.name} style={{ display: "block", fontSize: 14 }}>
-                      <input
-                        type="radio"
-                        name="sandwich-side"
-                        checked={sandwichSide?.name === sd.name}
-                        onChange={() => setSandwichSide(sd)}
-                      />{" "}
-                      {sd.name} (+${sd.price})
-                    </label>
-                  ))}
-
-                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #e5e5e5" }}>
-                    <label style={{ display: "block", fontSize: 14 }}>
-                      <input
-                        type="checkbox"
-                        checked={glutenFreeBun}
-                        onChange={(e) => setGlutenFreeBun(e.target.checked)}
-                      />{" "}
-                      Gluten Free Bun (+$2) / 无麸质面包 (+$2)
-                    </label>
-                  </div>
-
-                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-                    Tip: Choose side dish / gluten free bun first, then click “Add” on your sandwich.
-                    <br />
-                    提示：请先选择配菜或无麸质面包，然后点击对应三明治的 “Add” 按钮。
-                  </div>
-                </div>
-              )}
-
-              {isPizza(sec) && (
-                <div
-                  style={{
-                    marginTop: 10,
-                    marginBottom: 14,
-                    padding: 12,
-                    border: "1px solid #ddd",
-                    borderRadius: 8,
-                    background: "#fafafa",
-                    opacity: canOrder ? 1 : 0.7,
-                  }}
-                >
-                  <div style={{ fontWeight: 700, marginBottom: 6 }}>Pizza Options / 披萨选项</div>
-
-                  <label style={{ display: "block", fontSize: 14 }}>
-                    <input
-                      type="checkbox"
-                      checked={glutenFreeCrust}
-                      onChange={(e) => setGlutenFreeCrust(e.target.checked)}
-                    />{" "}
-                    Gluten Free Crust (+$3) / 无麸质饼底 (+$3)
-                  </label>
-
-                  <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-                    Tip: Select crust option first, then click “Add” on your pizza.
-                    <br />
-                    提示：请先选择饼底选项，然后点击对应披萨的 “Add” 按钮。
-                  </div>
-                </div>
-              )}
-
-              {/* ✅ 再显示该大类的菜品列表 */}
-              {secItems.map((it) => (
-                <div
-                  key={it.id}
-                  style={{
-                    border: "1px solid #eee",
-                    padding: 10,
-                    borderRadius: 8,
-                    marginBottom: 10,
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 12,
-                  }}
-                >
-                  <div style={{ fontWeight: 600 }}>
-                    {it.title_en} / {it.title_zh}
-                  </div>
-                  <div style={{ whiteSpace: "nowrap" }}>
-                    ${cents(it.base_price_cents)}
-                    <button
-                      style={{
-                        marginLeft: 10,
-                        opacity: canOrder ? 1 : 0.4,
-                        cursor: canOrder ? "pointer" : "not-allowed",
-                      }}
-                      disabled={!canOrder}
-                      onClick={() => addToCart(it, sec)}
-                    >
-                      Add
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           );
         })}
 
-      {/* ===== Cart ===== */}
+      {/* ---- Cart ---- */}
       <div style={{ marginTop: 40 }}>
         <h2>
           您的点餐：
-          {customerName.trim() && (
-            <span style={{ marginLeft: 8, color: "#b22222" }}>{customerName.trim()}</span>
-          )}
+          {customerName.trim() && <span style={{ marginLeft: 8, color: "#b22222" }}>{customerName.trim()}</span>}
         </h2>
 
         {cart.length === 0 && <div style={{ opacity: 0.7 }}>No items yet.</div>}
 
-        {cart.map((line: any) => (
+        {cart.map((line) => (
           <div
             key={line.id}
             style={{
@@ -370,25 +408,16 @@ export default function MenuPage() {
             }}
           >
             <div>
-              <div style={{ fontWeight: 600 }}>{line.title}</div>
-
-              {line.meta?.saladAddons?.length ? (
-                <div style={{ fontSize: 12, opacity: 0.75 }}>Add-ons: {line.meta.saladAddons.join(", ")}</div>
-              ) : null}
-
-              {line.meta?.sideDish ? (
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  Side: {line.meta.sideDish} (+${line.meta.sideDishPrice})
-                </div>
-              ) : null}
-
-              {line.meta?.glutenFreeBun ? <div style={{ fontSize: 12, opacity: 0.75 }}>GF bun +$2</div> : null}
-              {line.meta?.glutenFreeCrust ? <div style={{ fontSize: 12, opacity: 0.75 }}>GF crust +$3</div> : null}
+              <div style={{ fontWeight: 600 }}>
+                {line.titleEn} / {line.titleZh}
+              </div>
+              {line.optionLabels.length > 0 && (
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Options: {line.optionLabels.join(", ")}</div>
+              )}
             </div>
 
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <div style={{ fontWeight: 800 }}>${cents(lineTotalCents(line))}</div>
-
+              <div style={{ fontWeight: 800 }}>${cents(line.totalPriceCents * line.qty)}</div>
               <button
                 onClick={() => removeLine(line.id)}
                 style={{
@@ -407,6 +436,38 @@ export default function MenuPage() {
             </div>
           </div>
         ))}
+
+        {/* ---- Total + Submit ---- */}
+        {cart.length > 0 && (
+          <div style={{ marginTop: 16, paddingTop: 12, borderTop: "2px solid #ddd" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: 18 }}>
+              <span>Total / 合计</span>
+              <span>${cents(cartTotal)}</span>
+            </div>
+
+            <button
+              onClick={submitOrder}
+              disabled={submitting}
+              style={{
+                marginTop: 12,
+                width: "100%",
+                padding: "12px 0",
+                fontSize: 16,
+                fontWeight: 800,
+                background: "#b22222",
+                color: "white",
+                border: "none",
+                borderRadius: 8,
+                cursor: submitting ? "not-allowed" : "pointer",
+                opacity: submitting ? 0.6 : 1,
+              }}
+            >
+              {submitting ? "Submitting... / 提交中..." : "Submit Order / 提交订单"}
+            </button>
+
+            {submitError && <div style={{ marginTop: 8, color: "#a00" }}>{submitError}</div>}
+          </div>
+        )}
       </div>
     </div>
   );
