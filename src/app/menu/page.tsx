@@ -72,6 +72,8 @@ export default function MenuPage() {
 
   /* ---- per-item option selections (optionId set keyed by menuItemId) ---- */
   const [selectedOpts, setSelectedOpts] = useState<Record<string, Set<string>>>({});
+  /* ---- per-item note (keyed by menuItemId) ---- */
+  const [itemNotes, setItemNotes] = useState<Record<string, string>>({});
 
   /* ---- submit ---- */
   const [submitting, setSubmitting] = useState(false);
@@ -93,9 +95,6 @@ export default function MenuPage() {
         supabase.from("menu_options").select("*"),
         supabase.from("menu_item_option_groups").select("*"),
       ]);
-      console.log("[DEBUG] option_groups[0]:", og.data?.[0]);
-      console.log("[DEBUG] options[0]:", o.data?.[0]);
-      console.log("[DEBUG] item_option_groups[0]:", iog.data?.[0]);
       if (s.data) setSections(s.data);
       if (i.data) setItems(i.data);
       if (og.data) setOptionGroups(og.data);
@@ -171,12 +170,13 @@ export default function MenuPage() {
           (o) =>
             `${o.label_en}/${o.label_zh}${o.price_delta_cents ? ` (+$${cents(o.price_delta_cents)})` : ""}`
         ),
-        note: "",
+        note: (itemNotes[item.id] || "").trim(),
       },
     ]);
 
-    // reset selections for this item
+    // reset selections and note for this item
     setSelectedOpts((prev) => ({ ...prev, [item.id]: new Set() }));
+    setItemNotes((prev) => ({ ...prev, [item.id]: "" }));
   }
 
   function removeLine(id: string) {
@@ -365,6 +365,27 @@ export default function MenuPage() {
                       </div>
                     )}
 
+                    {/* Note input */}
+                    <div style={{ marginTop: 8 }}>
+                      <input
+                        placeholder="Note / 备注"
+                        value={itemNotes[it.id] || ""}
+                        onChange={(e) =>
+                          setItemNotes((prev) => ({ ...prev, [it.id]: e.target.value }))
+                        }
+                        disabled={!canOrder}
+                        style={{
+                          width: "100%",
+                          padding: "6px 8px",
+                          fontSize: 13,
+                          border: "1px solid #ddd",
+                          borderRadius: 6,
+                          outline: "none",
+                          opacity: canOrder ? 1 : 0.5,
+                        }}
+                      />
+                    </div>
+
                     {/* Add button */}
                     <div style={{ marginTop: 8, textAlign: "right" }}>
                       <button
@@ -413,6 +434,9 @@ export default function MenuPage() {
               </div>
               {line.optionLabels.length > 0 && (
                 <div style={{ fontSize: 12, opacity: 0.75 }}>Options: {line.optionLabels.join(", ")}</div>
+              )}
+              {line.note && (
+                <div style={{ fontSize: 12, opacity: 0.75 }}>Note: {line.note}</div>
               )}
             </div>
 
