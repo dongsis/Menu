@@ -45,7 +45,7 @@ export default function AdminOrdersPage() {
       }, 0);
       return { name: o.display_name, sum, updated_at: o.updated_at, items };
     });
-    const grand = byPerson.reduce((a, b) => a + b.sum, 0);
+    const grand = byPerson.reduce<number>((a, b) => a + b, 0)
     return { grand, byPerson };
   }, [data]);
 
@@ -81,7 +81,8 @@ export default function AdminOrdersPage() {
         </div>
       )}
 
-      {totals.byPerson.map((p) => (
+      {(totals.byPerson as Array<{ name: string; sum: number; updated_at: string; items: any[] }>).map(
+  (p) => (
         <div key={p.name} style={{ border: "1px solid #eee", padding: 12, borderRadius: 8, marginBottom: 12 }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800 }}>
             <span>{p.name}</span>
