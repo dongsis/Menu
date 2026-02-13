@@ -1,7 +1,7 @@
 "use client";
 export const dynamic = "force-dynamic";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useCallback } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
 function cents(n: number) {
@@ -14,41 +14,74 @@ export default function AdminOrdersPage() {
   const [data, setData] = useState<any>(null);
   const [msg, setMsg] = useState("");
 
-  if (!supabase) {
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: 16 }}>
-      <h1>/admin/orders</h1>
-      <div style={{ color: "#a00" }}>
-        Supabase client is not initialized. Check NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY.
-      </div>
-    </div>
-  );
-}
+  // 将“是否初始化”变成稳定的布尔值
+  const supabaseReady = !!supabase;
 
-  async function load() {
+  const load = useCallback(async () => {
     setMsg("");
 
-    const { data, error } = await supabase.rpc("rpc_admin_get_session_orders", {
-      p_session_id: sessionId,
-      p_admin_token: adminToken,
+    if (!supabaseReady) {
+      setMsg("Supabase client is not initialized. Check NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY.");
+      return;
+    }
+
+    if (!sessionId.trim()) {
+      setMsg("Session ID is required.");
+      return;
+    }
+    if (!adminToken.trim()) {
+      setMsg("Admin Token is required.");
+      return;
+    }
+
+    const { data, error } = await supabase!.rpc("rpc_admin_get_session_orders", {
+      p_session_id: sessionId.trim(),
+      p_admin_token: adminToken.trim(),
     });
 
-    if (error) return setMsg(error.message);
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
     setData(data);
-  }
+  }, [supabaseReady, sessionId, adminToken]);
 
-  async function setLock(isLocked: boolean) {
-    setMsg("");
+  const setLock = useCallback(
+    async (isLocked: boolean) => {
+      setMsg("");
 
-    const { error } = await supabase.rpc("rpc_set_session_lock", {
-      p_session_id: sessionId,
-      p_admin_token: adminToken,
-      p_is_locked: isLocked,
-    });
+      if (!supabaseReady) {
+        setMsg(
+          "Supabase client is not initialized. Check NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY."
+        );
+        return;
+      }
 
-    if (error) return setMsg(error.message);
-    await load();
-  }
+      if (!sessionId.trim()) {
+        setMsg("Session ID is required.");
+        return;
+      }
+      if (!adminToken.trim()) {
+        setMsg("Admin Token is required.");
+        return;
+      }
+
+      const { error } = await supabase!.rpc("rpc_set_session_lock", {
+        p_session_id: sessionId.trim(),
+        p_admin_token: adminToken.trim(),
+        p_is_locked: isLocked,
+      });
+
+      if (error) {
+        setMsg(error.message);
+        return;
+      }
+
+      await load();
+    },
+    [supabaseReady, sessionId, adminToken, load]
+  );
 
   const totals = useMemo(() => {
     if (!data?.orders) return { grand: 0, byPerson: [] as any[] };
@@ -58,8 +91,7 @@ export default function AdminOrdersPage() {
       const sum = items.reduce((acc: number, it: any) => {
         const base = (it.unit_base_price_cents || 0) * (it.qty || 0);
         const optDelta =
-          (it.options || []).reduce((d: number, op: any) => d + (op.price_delta_cents || 0), 0) *
-          (it.qty || 0);
+          (it.options || []).reduce((d: number, op: any) => d + (op.price_delta_cents || 0), 0) * (it.qty || 0);
         return acc + base + optDelta;
       }, 0);
 
@@ -69,6 +101,17 @@ export default function AdminOrdersPage() {
     const grand = byPerson.reduce((acc: number, row: any) => acc + (row.sum || 0), 0);
     return { grand, byPerson };
   }, [data]);
+
+  if (!supabaseReady) {
+    return (
+      <div style={{ maxWidth: 980, margin: "0 auto", padding: 16 }}>
+        <h1>/admin/orders</h1>
+        <div style={{ color: "#a00" }}>
+          Supabase client is not initialized. Check NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: 16 }}>
@@ -123,9 +166,7 @@ export default function AdminOrdersPage() {
                   {it.options
                     .map(
                       (op: any) =>
-                        `${op.label_en}/${op.label_zh}${
-                          op.price_delta_cents ? `(${cents(op.price_delta_cents)})` : ""
-                        }`
+                        `${op.label_en}/${op.label_zh}${op.price_delta_cents ? `(${cents(op.price_delta_cents)})` : ""}`
                     )
                     .join(", ")}
                 </div>
