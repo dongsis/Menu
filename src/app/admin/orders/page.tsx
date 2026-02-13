@@ -14,6 +14,17 @@ export default function AdminOrdersPage() {
   const [data, setData] = useState<any>(null);
   const [msg, setMsg] = useState("");
 
+  if (!supabase) {
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: 16 }}>
+      <h1>/admin/orders</h1>
+      <div style={{ color: "#a00" }}>
+        Supabase client is not initialized. Check NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY.
+      </div>
+    </div>
+  );
+}
+
   async function load() {
     setMsg("");
 
