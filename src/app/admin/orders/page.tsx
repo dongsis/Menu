@@ -45,7 +45,7 @@ export default function AdminOrdersPage() {
       }, 0);
       return { name: o.display_name, sum, updated_at: o.updated_at, items };
     });
-    const grand = byPerson.reduce<number>((a, b) => a + b, 0)
+    const grand = byPerson.reduce((acc: number, row: any) => acc + (row.sum || 0), 0)
     return { grand, byPerson };
   }, [data]);
 
